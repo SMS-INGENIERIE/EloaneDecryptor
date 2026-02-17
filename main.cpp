@@ -7,11 +7,11 @@
  *   mkdir build && cd build
  *   cmake .. && cmake --build .
  */
-
 #include <QApplication>
 #include <QWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <string>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -25,7 +25,9 @@
 #include <QDropEvent>
 #include <QMimeData>
 #include <QIcon>
-
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/hmac.h>
@@ -289,11 +291,26 @@ private:
         if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
             f.write(m_decryptedData.toUtf8());
             f.close();
-            // Mettre en lecture seule — supprime toutes les permissions d'écriture
-            f.setPermissions(QFileDevice::ReadOwner | QFileDevice::ReadUser |
-                             QFileDevice::ReadGroup | QFileDevice::ReadOther);
-            showStatus("JSON exporté (lecture seule) : " + path, true);
+        } else {
+            showStatus("Erreur d'écriture : " + path, false);
+            return;
         }
+
+        // Forcer lecture seule via Windows API
+        std::wstring wpath = path.toStdWString();
+        DWORD attrs = GetFileAttributesW(wpath.c_str());
+        if (attrs == INVALID_FILE_ATTRIBUTES) {
+            showStatus("Erreur : fichier introuvable après écriture", false);
+            return;
+        }
+        BOOL result = SetFileAttributesW(wpath.c_str(), attrs | FILE_ATTRIBUTE_READONLY);
+        if (!result) {
+            showStatus("Erreur : impossible de mettre en lecture seule (code " +
+                           QString::number(GetLastError()) + ")", false);
+            return;
+        }
+
+        showStatus("JSON exporté (lecture seule) : " + path, true);
     }
 
     void showStatus(const QString& msg, bool success) {
