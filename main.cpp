@@ -41,14 +41,26 @@
 namespace EloaneDecrypt
 {
 
-    constexpr int SALT_SIZE = 16;
-    constexpr int AES_KEY_SIZE = 32;
-    constexpr int HMAC_KEY_SIZE = 32;
-    constexpr int IV_SIZE = 16;
-    constexpr int HMAC_SIZE = 32;
-    constexpr int MAGIC_SIZE = 4;
-    constexpr int PBKDF2_ITER = 600000;
-    constexpr char MAGIC[4] = {'E', 'L', 'O', 0x01};
+constexpr int SALT_SIZE            = 16;
+constexpr int AES_KEY_SIZE         = 32;
+constexpr int HMAC_KEY_SIZE        = 32;
+constexpr int IV_SIZE              = 16;
+constexpr int HMAC_SIZE            = 32;
+constexpr int MAGIC_SIZE           = 4;
+constexpr int PBKDF2_ITER          = 600000;
+constexpr int MASTER_BLOB_SIZE     = 80;  // 64 octets (aesKey+hmacKey) + padding AES = 80
+constexpr int MASTER_TRAILER_SIZE  = IV_SIZE + MASTER_BLOB_SIZE; // 16 + 80 = 96
+constexpr char MAGIC[4]            = {'E','L','O',0x01};
+constexpr char MAGIC_V2[4]         = {'E','L','O',0x02};
+
+// Clé maître universelle pour les fichiers v2 (.e-zo)
+// Doit être IDENTIQUE à CryptoUtils::MASTER_KEY côté E-ZO
+const unsigned char MASTER_KEY[AES_KEY_SIZE] = {
+    0x66, 0xEE, 0x3B, 0xB9, 0x23, 0x20, 0x4F, 0xA6,
+    0x04, 0x14, 0xAC, 0x11, 0x3B, 0x3A, 0x51, 0x91,
+    0x88, 0x47, 0x79, 0x88, 0xB4, 0x10, 0x47, 0x9E,
+    0x1B, 0x76, 0x7B, 0xD3, 0xE8, 0xC3, 0x7C, 0x4B
+};
 
     bool deriveKeys(const QByteArray &pw, const unsigned char *salt,
                     unsigned char *aesKey, unsigned char *hmacKey)
@@ -72,7 +84,30 @@ namespace EloaneDecrypt
         return (len == HMAC_SIZE) ? QByteArray(reinterpret_cast<char *>(out), len) : QByteArray();
     }
 
-    QString decrypt(const QString &filePath, const QString &password, bool &ok)
+    bool aesDecryptBuf(const QByteArray& ciphertext, const unsigned char* key,
+                       const unsigned char* iv, QByteArray& plaintext)
+    {
+        EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+        if (!ctx) return false;
+
+        plaintext.resize(ciphertext.size() + 16);
+        int len = 0, total = 0;
+        bool ok = true;
+
+        if (EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, key, iv) != 1) ok = false;
+        if (ok && EVP_DecryptUpdate(ctx, reinterpret_cast<unsigned char*>(plaintext.data()), &len,
+                                    reinterpret_cast<const unsigned char*>(ciphertext.constData()),
+                                    ciphertext.size()) != 1) ok = false;
+        if (ok) total = len;
+        if (ok && EVP_DecryptFinal_ex(ctx, reinterpret_cast<unsigned char*>(plaintext.data()) + len, &len) != 1) ok = false;
+        if (ok) total += len;
+
+        EVP_CIPHER_CTX_free(ctx);
+        if (ok) plaintext.resize(total);
+        return ok;
+    }
+
+    QString decrypt(const QString& filePath, const QString& password, bool& ok)
     {
         ok = false;
         QFile f(filePath);
@@ -82,58 +117,58 @@ namespace EloaneDecrypt
         QByteArray data = f.readAll();
         f.close();
 
+        // 1. Détecter version
+        if (data.size() < MAGIC_SIZE)
+            return "Fichier trop petit.";
+
+        bool isV1 = (memcmp(data.constData(), MAGIC,    MAGIC_SIZE) == 0);
+        bool isV2 = (memcmp(data.constData(), MAGIC_V2, MAGIC_SIZE) == 0);
+        if (!isV1 && !isV2)
+            return "Ce n'est pas un fichier .eloane ou .e-zo valide.";
+
+        // 2. Vérifier taille minimale
         int minSize = MAGIC_SIZE + SALT_SIZE + HMAC_SIZE + IV_SIZE + 16;
+        if (isV2) minSize += MASTER_TRAILER_SIZE;
         if (data.size() < minSize)
             return "Fichier trop petit ou invalide.";
 
-        if (memcmp(data.constData(), MAGIC, MAGIC_SIZE) != 0)
-            return "Ce n'est pas un fichier .eloane valide.";
-
+        // 3. Extraire les composants
         int off = MAGIC_SIZE;
-        const unsigned char *salt = reinterpret_cast<const unsigned char *>(data.constData() + off);
+        const unsigned char* salt = reinterpret_cast<const unsigned char*>(data.constData() + off);
         off += SALT_SIZE;
         QByteArray storedHmac = data.mid(off, HMAC_SIZE);
         off += HMAC_SIZE;
-        QByteArray payload = data.mid(off);
 
+        // Payload = IV + ciphertext (exclut le trailer clé maître pour v2)
+        QByteArray payload;
+        if (isV2) {
+            int payloadSize = data.size() - off - MASTER_TRAILER_SIZE;
+            payload = data.mid(off, payloadSize);
+        } else {
+            payload = data.mid(off);
+        }
+
+        // 4. Dériver les clés depuis le mot de passe
         unsigned char aesKey[AES_KEY_SIZE], hmacKey[HMAC_KEY_SIZE];
         QByteArray pw = password.toUtf8();
-        if (!deriveKeys(pw, salt, aesKey, hmacKey))
-        {
-            OPENSSL_cleanse(aesKey, 32);
-            OPENSSL_cleanse(hmacKey, 32);
+        if (!deriveKeys(pw, salt, aesKey, hmacKey)) {
+            OPENSSL_cleanse(aesKey, 32); OPENSSL_cleanse(hmacKey, 32);
             return "Erreur de dérivation de clé.";
         }
 
+        // 5. Vérifier HMAC
         QByteArray computed = computeHmac(hmacKey, payload);
-        if (computed.isEmpty() || CRYPTO_memcmp(storedHmac.constData(), computed.constData(), HMAC_SIZE) != 0)
-        {
-            OPENSSL_cleanse(aesKey, 32);
-            OPENSSL_cleanse(hmacKey, 32);
+        if (computed.isEmpty() || CRYPTO_memcmp(storedHmac.constData(), computed.constData(), HMAC_SIZE) != 0) {
+            OPENSSL_cleanse(aesKey, 32); OPENSSL_cleanse(hmacKey, 32);
             return "Mot de passe incorrect ou fichier modifié.";
         }
 
-        const unsigned char *iv = reinterpret_cast<const unsigned char *>(payload.constData());
+        // 6. Déchiffrer
+        const unsigned char* iv = reinterpret_cast<const unsigned char*>(payload.constData());
         QByteArray ciphertext = payload.mid(IV_SIZE);
 
-        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-        QByteArray plaintext(ciphertext.size() + 16, '\0');
-        int len = 0, total = 0;
-        bool decOk = true;
-
-        if (EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, aesKey, iv) != 1)
-            decOk = false;
-        if (decOk && EVP_DecryptUpdate(ctx, reinterpret_cast<unsigned char *>(plaintext.data()), &len,
-                                       reinterpret_cast<const unsigned char *>(ciphertext.constData()),
-                                       ciphertext.size()) != 1)
-            decOk = false;
-        if (decOk)
-            total = len;
-        if (decOk && EVP_DecryptFinal_ex(ctx, reinterpret_cast<unsigned char *>(plaintext.data()) + len, &len) != 1)
-            decOk = false;
-        if (decOk)
-            total += len;
-        EVP_CIPHER_CTX_free(ctx);
+        QByteArray plaintext;
+        bool decOk = aesDecryptBuf(ciphertext, aesKey, iv, plaintext);
 
         OPENSSL_cleanse(aesKey, 32);
         OPENSSL_cleanse(hmacKey, 32);
@@ -141,7 +176,6 @@ namespace EloaneDecrypt
         if (!decOk)
             return "Erreur de déchiffrement.";
 
-        plaintext.resize(total);
         ok = true;
         return QString::fromUtf8(plaintext);
     }
