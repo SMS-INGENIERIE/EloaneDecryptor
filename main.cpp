@@ -11,7 +11,6 @@
 #include <QWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <string>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -62,123 +61,123 @@ const unsigned char MASTER_KEY[AES_KEY_SIZE] = {
     0x1B, 0x76, 0x7B, 0xD3, 0xE8, 0xC3, 0x7C, 0x4B
 };
 
-    bool deriveKeys(const QByteArray &pw, const unsigned char *salt,
-                    unsigned char *aesKey, unsigned char *hmacKey)
-    {
-        unsigned char derived[64];
-        if (PKCS5_PBKDF2_HMAC(pw.constData(), pw.size(), salt, SALT_SIZE,
-                              PBKDF2_ITER, EVP_sha256(), 64, derived) != 1)
-            return false;
-        memcpy(aesKey, derived, 32);
-        memcpy(hmacKey, derived + 32, 32);
-        OPENSSL_cleanse(derived, 64);
-        return true;
+bool deriveKeys(const QByteArray &pw, const unsigned char *salt,
+                unsigned char *aesKey, unsigned char *hmacKey)
+{
+    unsigned char derived[64];
+    if (PKCS5_PBKDF2_HMAC(pw.constData(), pw.size(), salt, SALT_SIZE,
+                          PBKDF2_ITER, EVP_sha256(), 64, derived) != 1)
+        return false;
+    memcpy(aesKey, derived, 32);
+    memcpy(hmacKey, derived + 32, 32);
+    OPENSSL_cleanse(derived, 64);
+    return true;
+}
+
+QByteArray computeHmac(const unsigned char *key, const QByteArray &data)
+{
+    unsigned char out[EVP_MAX_MD_SIZE];
+    unsigned int len = 0;
+    HMAC(EVP_sha256(), key, HMAC_KEY_SIZE,
+         reinterpret_cast<const unsigned char *>(data.constData()), data.size(), out, &len);
+    return (len == HMAC_SIZE) ? QByteArray(reinterpret_cast<char *>(out), len) : QByteArray();
+}
+
+bool aesDecryptBuf(const QByteArray& ciphertext, const unsigned char* key,
+                   const unsigned char* iv, QByteArray& plaintext)
+{
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return false;
+
+    plaintext.resize(ciphertext.size() + 16);
+    int len = 0, total = 0;
+    bool ok = true;
+
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, key, iv) != 1) ok = false;
+    if (ok && EVP_DecryptUpdate(ctx, reinterpret_cast<unsigned char*>(plaintext.data()), &len,
+                                reinterpret_cast<const unsigned char*>(ciphertext.constData()),
+                                ciphertext.size()) != 1) ok = false;
+    if (ok) total = len;
+    if (ok && EVP_DecryptFinal_ex(ctx, reinterpret_cast<unsigned char*>(plaintext.data()) + len, &len) != 1) ok = false;
+    if (ok) total += len;
+
+    EVP_CIPHER_CTX_free(ctx);
+    if (ok) plaintext.resize(total);
+    return ok;
+}
+
+QString decrypt(const QString& filePath, const QString& password, bool& ok)
+{
+    ok = false;
+    QFile f(filePath);
+    if (!f.open(QIODevice::ReadOnly))
+        return "Impossible d'ouvrir le fichier.";
+
+    QByteArray data = f.readAll();
+    f.close();
+
+    // 1. Détecter version
+    if (data.size() < MAGIC_SIZE)
+        return "Fichier trop petit.";
+
+    bool isV1 = (memcmp(data.constData(), MAGIC,    MAGIC_SIZE) == 0);
+    bool isV2 = (memcmp(data.constData(), MAGIC_V2, MAGIC_SIZE) == 0);
+    if (!isV1 && !isV2)
+        return "Ce n'est pas un fichier .eloane ou .e-zo valide.";
+
+    // 2. Vérifier taille minimale
+    int minSize = MAGIC_SIZE + SALT_SIZE + HMAC_SIZE + IV_SIZE + 16;
+    if (isV2) minSize += MASTER_TRAILER_SIZE;
+    if (data.size() < minSize)
+        return "Fichier trop petit ou invalide.";
+
+    // 3. Extraire les composants
+    int off = MAGIC_SIZE;
+    const unsigned char* salt = reinterpret_cast<const unsigned char*>(data.constData() + off);
+    off += SALT_SIZE;
+    QByteArray storedHmac = data.mid(off, HMAC_SIZE);
+    off += HMAC_SIZE;
+
+    // Payload = IV + ciphertext (exclut le trailer clé maître pour v2)
+    QByteArray payload;
+    if (isV2) {
+        int payloadSize = data.size() - off - MASTER_TRAILER_SIZE;
+        payload = data.mid(off, payloadSize);
+    } else {
+        payload = data.mid(off);
     }
 
-    QByteArray computeHmac(const unsigned char *key, const QByteArray &data)
-    {
-        unsigned char out[EVP_MAX_MD_SIZE];
-        unsigned int len = 0;
-        HMAC(EVP_sha256(), key, HMAC_KEY_SIZE,
-             reinterpret_cast<const unsigned char *>(data.constData()), data.size(), out, &len);
-        return (len == HMAC_SIZE) ? QByteArray(reinterpret_cast<char *>(out), len) : QByteArray();
+    // 4. Dériver les clés depuis le mot de passe
+    unsigned char aesKey[AES_KEY_SIZE], hmacKey[HMAC_KEY_SIZE];
+    QByteArray pw = password.toUtf8();
+    if (!deriveKeys(pw, salt, aesKey, hmacKey)) {
+        OPENSSL_cleanse(aesKey, 32); OPENSSL_cleanse(hmacKey, 32);
+        return "Erreur de dérivation de clé.";
     }
 
-    bool aesDecryptBuf(const QByteArray& ciphertext, const unsigned char* key,
-                       const unsigned char* iv, QByteArray& plaintext)
-    {
-        EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-        if (!ctx) return false;
-
-        plaintext.resize(ciphertext.size() + 16);
-        int len = 0, total = 0;
-        bool ok = true;
-
-        if (EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, key, iv) != 1) ok = false;
-        if (ok && EVP_DecryptUpdate(ctx, reinterpret_cast<unsigned char*>(plaintext.data()), &len,
-                                    reinterpret_cast<const unsigned char*>(ciphertext.constData()),
-                                    ciphertext.size()) != 1) ok = false;
-        if (ok) total = len;
-        if (ok && EVP_DecryptFinal_ex(ctx, reinterpret_cast<unsigned char*>(plaintext.data()) + len, &len) != 1) ok = false;
-        if (ok) total += len;
-
-        EVP_CIPHER_CTX_free(ctx);
-        if (ok) plaintext.resize(total);
-        return ok;
+    // 5. Vérifier HMAC
+    QByteArray computed = computeHmac(hmacKey, payload);
+    if (computed.isEmpty() || CRYPTO_memcmp(storedHmac.constData(), computed.constData(), HMAC_SIZE) != 0) {
+        OPENSSL_cleanse(aesKey, 32); OPENSSL_cleanse(hmacKey, 32);
+        return "Mot de passe incorrect ou fichier modifié.";
     }
 
-    QString decrypt(const QString& filePath, const QString& password, bool& ok)
-    {
-        ok = false;
-        QFile f(filePath);
-        if (!f.open(QIODevice::ReadOnly))
-            return "Impossible d'ouvrir le fichier.";
+    // 6. Déchiffrer
+    const unsigned char* iv = reinterpret_cast<const unsigned char*>(payload.constData());
+    QByteArray ciphertext = payload.mid(IV_SIZE);
 
-        QByteArray data = f.readAll();
-        f.close();
+    QByteArray plaintext;
+    bool decOk = aesDecryptBuf(ciphertext, aesKey, iv, plaintext);
 
-        // 1. Détecter version
-        if (data.size() < MAGIC_SIZE)
-            return "Fichier trop petit.";
+    OPENSSL_cleanse(aesKey, 32);
+    OPENSSL_cleanse(hmacKey, 32);
 
-        bool isV1 = (memcmp(data.constData(), MAGIC,    MAGIC_SIZE) == 0);
-        bool isV2 = (memcmp(data.constData(), MAGIC_V2, MAGIC_SIZE) == 0);
-        if (!isV1 && !isV2)
-            return "Ce n'est pas un fichier .eloane ou .e-zo valide.";
+    if (!decOk)
+        return "Erreur de déchiffrement.";
 
-        // 2. Vérifier taille minimale
-        int minSize = MAGIC_SIZE + SALT_SIZE + HMAC_SIZE + IV_SIZE + 16;
-        if (isV2) minSize += MASTER_TRAILER_SIZE;
-        if (data.size() < minSize)
-            return "Fichier trop petit ou invalide.";
-
-        // 3. Extraire les composants
-        int off = MAGIC_SIZE;
-        const unsigned char* salt = reinterpret_cast<const unsigned char*>(data.constData() + off);
-        off += SALT_SIZE;
-        QByteArray storedHmac = data.mid(off, HMAC_SIZE);
-        off += HMAC_SIZE;
-
-        // Payload = IV + ciphertext (exclut le trailer clé maître pour v2)
-        QByteArray payload;
-        if (isV2) {
-            int payloadSize = data.size() - off - MASTER_TRAILER_SIZE;
-            payload = data.mid(off, payloadSize);
-        } else {
-            payload = data.mid(off);
-        }
-
-        // 4. Dériver les clés depuis le mot de passe
-        unsigned char aesKey[AES_KEY_SIZE], hmacKey[HMAC_KEY_SIZE];
-        QByteArray pw = password.toUtf8();
-        if (!deriveKeys(pw, salt, aesKey, hmacKey)) {
-            OPENSSL_cleanse(aesKey, 32); OPENSSL_cleanse(hmacKey, 32);
-            return "Erreur de dérivation de clé.";
-        }
-
-        // 5. Vérifier HMAC
-        QByteArray computed = computeHmac(hmacKey, payload);
-        if (computed.isEmpty() || CRYPTO_memcmp(storedHmac.constData(), computed.constData(), HMAC_SIZE) != 0) {
-            OPENSSL_cleanse(aesKey, 32); OPENSSL_cleanse(hmacKey, 32);
-            return "Mot de passe incorrect ou fichier modifié.";
-        }
-
-        // 6. Déchiffrer
-        const unsigned char* iv = reinterpret_cast<const unsigned char*>(payload.constData());
-        QByteArray ciphertext = payload.mid(IV_SIZE);
-
-        QByteArray plaintext;
-        bool decOk = aesDecryptBuf(ciphertext, aesKey, iv, plaintext);
-
-        OPENSSL_cleanse(aesKey, 32);
-        OPENSSL_cleanse(hmacKey, 32);
-
-        if (!decOk)
-            return "Erreur de déchiffrement.";
-
-        ok = true;
-        return QString::fromUtf8(plaintext);
-    }
+    ok = true;
+    return QString::fromUtf8(plaintext);
+}
 
 } // namespace EloaneDecrypt
 
@@ -361,22 +360,15 @@ private:
             return;
         }
 
-        // Forcer lecture seule via Windows API
+// Forcer lecture seule (cross-platform)
+#ifdef Q_OS_WIN
         std::wstring wpath = path.toStdWString();
         DWORD attrs = GetFileAttributesW(wpath.c_str());
-        if (attrs == INVALID_FILE_ATTRIBUTES)
-        {
-            showStatus("Erreur : fichier introuvable après écriture", false);
-            return;
-        }
-        BOOL result = SetFileAttributesW(wpath.c_str(), attrs | FILE_ATTRIBUTE_READONLY);
-        if (!result)
-        {
-            showStatus("Erreur : impossible de mettre en lecture seule (code " +
-                           QString::number(GetLastError()) + ")",
-                       false);
-            return;
-        }
+        if (attrs != INVALID_FILE_ATTRIBUTES)
+            SetFileAttributesW(wpath.c_str(), attrs | FILE_ATTRIBUTE_READONLY);
+#else
+        QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::ReadGroup | QFileDevice::ReadOther);
+#endif
 
         showStatus("JSON exporté (lecture seule) : " + path, true);
     }

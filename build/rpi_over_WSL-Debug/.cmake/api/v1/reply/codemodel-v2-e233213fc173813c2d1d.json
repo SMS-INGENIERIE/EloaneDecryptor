@@ -1,0 +1,79 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-Debug-33a95c3c1003999f6afb.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.16"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "EloaneDecryptor",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "EloaneDecryptor::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-EloaneDecryptor-Debug-820b033f38d4cd04ab78.json",
+					"name" : "EloaneDecryptor",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "EloaneDecryptor_autogen::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-EloaneDecryptor_autogen-Debug-660e57a209ba88c091d2.json",
+					"name" : "EloaneDecryptor_autogen",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "EloaneDecryptor_autogen_timestamp_deps::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-EloaneDecryptor_autogen_timestamp_deps-Debug-d16276a25462f9a34c36.json",
+					"name" : "EloaneDecryptor_autogen_timestamp_deps",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "C:/Pro/clientBE/BIOPULZ/IHM_SOFT/E-ZO_CONNECTED/Decryptor/build/rpi_over_WSL-Debug",
+		"source" : "C:/Pro/clientBE/BIOPULZ/IHM_SOFT/E-ZO_CONNECTED/Decryptor"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 7
+	}
+}
